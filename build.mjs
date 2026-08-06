@@ -1,0 +1,311 @@
+// build.mjs — runs on the GitHub Actions runner (Node 20+, no dependencies).
+//
+// Cross-references two shared Google Sheets and writes ./public/data.json for the
+// static dashboard. READ-ONLY: it only fetches the sheets via CSV/gviz export
+// endpoints; it never writes to them.
+//
+// DATA MODEL (this account) --------------------------------------------------
+//   1) Métricas dos Anúncios — aba "Meta Ads": Day / Campaign Name / Ad Set Name /
+//      Ad Name / Amount Spent / Impressions / Link Clicks / Landing Page Views /
+//      Checkouts Initiated. One row per day×campaign×conjunto×anúncio.
+//   2) Lista de Compradores — aba "29/08": Data / Nome / Email / Telefone / Status /
+//      UTM Source / UTM Medium / UTM Campaign / UTM Content / UTM Term / UTM id.
+//      One row per sale. Attribution comes from the UTMs:
+//        utm_campaign → Campaign Name · utm_medium → Ad Set Name · utm_content → Ad Name.
+//      VALUE: this tab has no price column yet. The build AUTO-DETECTS a value column
+//      (Valor da Compra / Valor / Bruto / Faturamento / …) the moment it is added.
+//      Until then each sale is priced at FALLBACK_TICKET (see below).
+//
+// IMPOSTO: o gasto vai CRU (bruto) no data.json; o dashboard multiplica por meta.tax
+// (×1,1385) antes de TODAS as métricas — assim nenhuma métrica escapa do imposto.
+
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+
+// --- Sources ----------------------------------------------------------------
+const ADS_ID    = '1r0Gu8XTVmG4tlMlsY8D2OKvkEpvvrAjTACR13LEn87s';
+const BUYERS_ID = '1tCmJ79YCYFje8sH9NFXrWuO6366i5JowRDSQ70zs0aM';
+const SALES_TAB = '29/08';                       // aba dos compradores (gid 0)
+
+const SHEET_ADS   = `https://docs.google.com/spreadsheets/d/${ADS_ID}/export?format=csv&gid=0`;
+const SHEET_SALES = `https://docs.google.com/spreadsheets/d/${BUYERS_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(SALES_TAB)}`;
+
+const ADS_URL    = `https://docs.google.com/spreadsheets/d/${ADS_ID}/edit`;
+const BUYERS_URL = `https://docs.google.com/spreadsheets/d/${BUYERS_ID}/edit`;
+
+// --- Tax on ad spend (applied in the dashboard, not here) -------------------
+const TAX_RATE = 1.1385;
+
+// --- Fallback ticket while the buyers tab has no value column ----------------
+// Set this to the offer price (e.g. 197) if you want revenue/ROAS while the
+// sheet still has no "Valor da Compra" column. 0 = revenue stays zero until the
+// column is added (the build then reads it automatically).
+const FALLBACK_TICKET = 0;
+
+// --- utm_source values that mean "paid Meta traffic" ------------------------
+const isPaidSource = (s) => /^(fb|facebook|facebook[-\s]?ads|meta|meta[-\s]?ads|ig|instagram)$/i.test(String(s || '').trim());
+
+// ---------------------------------------------------------------------------
+// CSV parser (quoted fields, escaped quotes, embedded newlines)
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += c;
+    } else {
+      if (c === '"') inQ = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else if (c === '\r') { /* ignore */ }
+      else field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+// Number in Brazilian or plain format: "1.234,56" / "46,9" / "197"
+function num(s) {
+  if (s == null) return 0;
+  s = String(s).trim().replace(/^R\$\s*/i, '');
+  if (!s) return 0;
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Collapse whitespace + trim (join keys sometimes differ only by double spaces).
+const normKey = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+// Lowercase + strip accents (for matching).
+const fold = (s) => normKey(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+// Decode a URL-encoded UTM then normalize.
+function decodeUtm(s) {
+  let v = String(s == null ? '' : s);
+  if (v.includes('%')) { try { v = decodeURIComponent(v.replace(/\+/g, ' ')); } catch { /* keep */ } }
+  return normKey(v);
+}
+const isUtm = (s) => {
+  const v = String(s == null ? '' : s).trim().toLowerCase();
+  return v !== '' && v !== 'undefined' && !v.includes('{{');
+};
+// Meta sometimes appends "|<numeric id>" to UTM values. Strip a trailing "|<6+ digits>".
+const stripId = (s) => decodeUtm(s).replace(/\s*\|\s*\d{6,}\s*$/, '').trim();
+// utm_content occasionally = "<AdName>|<id>::<fbclid junk>::" → take the ad name.
+const cleanContent = (s) => {
+  let v = decodeUtm(s).split('::')[0].split('|')[0];
+  return normKey(v);
+};
+
+const pad = (n) => String(n).padStart(2, '0');
+
+// Extract YYYY-MM-DD from "06/08/2026 09:04", "6/8/2026", ISO…
+function isoDate(s) {
+  const t = String(s || '').trim();
+  let m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);            // ISO
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = t.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);           // D/M/YYYY (Brazil)
+  if (m) return `${m[3]}-${pad(+m[2])}-${pad(+m[1])}`;
+  return null;
+}
+
+async function fetchText(url, label) {
+  const r = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'funnel-dashboard-build' } });
+  if (!r.ok) throw new Error(`Fetch failed ${r.status} for ${label}`);
+  const body = await r.text();
+  if (/^\s*<!DOCTYPE html/i.test(body)) {
+    throw new Error(`Got an HTML page instead of CSV for ${label} — the sheet is probably NOT shared publicly (set "Anyone with the link → Viewer").`);
+  }
+  return body;
+}
+// Case/space-insensitive header lookup; accepts several aliases.
+function headerIndex(h, ...names) {
+  const want = names.map((n) => fold(n));
+  return h.findIndex((x) => want.includes(fold(x)));
+}
+
+(async () => {
+  const [csvAds, csvSales] = await Promise.all([
+    fetchText(SHEET_ADS, 'ads sheet'),
+    fetchText(SHEET_SALES, `buyers tab "${SALES_TAB}"`),
+  ]);
+
+  // ---------------- Sheet 1: Meta Ads metrics ----------------
+  const a = parseCSV(csvAds);
+  const h1 = a[0] || [];
+  const I = {
+    day:   headerIndex(h1, 'Day'),
+    camp:  headerIndex(h1, 'Campaign Name'),
+    set:   headerIndex(h1, 'Ad Set Name'),
+    ad:    headerIndex(h1, 'Ad Name'),
+    spend: headerIndex(h1, 'Amount Spent'),
+    imp:   headerIndex(h1, 'Impressions'),
+    clk:   headerIndex(h1, 'Link Clicks'),
+    lpv:   headerIndex(h1, 'Landing Page Views'),
+    chk:   headerIndex(h1, 'Checkouts Initiated'),
+  };
+  const ads = [];
+  for (let i = 1; i < a.length; i++) {
+    const r = a[i];
+    if (!r || r.length < 2) continue;
+    const day = String(r[I.day] || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+    ads.push({
+      d: day,
+      c: normKey(r[I.camp]),
+      s: normKey(r[I.set]),
+      a: normKey(r[I.ad]),
+      spend: num(r[I.spend]),                       // GROSS — tax applied in dashboard
+      imp: Math.round(num(r[I.imp])),
+      clk: Math.round(num(r[I.clk])),
+      lpv: I.lpv >= 0 ? Math.round(num(r[I.lpv])) : 0,
+      ic:  I.chk >= 0 ? Math.round(num(r[I.chk])) : 0,
+    });
+  }
+
+  // Canonical name lookups (folded → original ads-sheet spelling) so a sale's
+  // campaign/conjunto/anúncio join EXACTLY to the ad rows in the grouping tables.
+  const canonCamp = new Map(), canonSet = new Map(), canonAd = new Map();
+  // Ad-name → {campaign, adset} it spent most under (fallback attribution).
+  const spendByCombo = new Map();
+  for (const r of ads) {
+    if (r.c) canonCamp.set(fold(r.c), r.c);
+    if (r.s) canonSet.set(fold(r.s), r.s);
+    if (r.a) canonAd.set(fold(r.a), r.a);
+    if (r.a) {
+      const ak = fold(r.a);
+      const m = spendByCombo.get(ak) || new Map();
+      const k = r.c + '||' + r.s;
+      m.set(k, (m.get(k) || 0) + r.spend);
+      spendByCombo.set(ak, m);
+    }
+  }
+  const adToCombo = new Map();
+  for (const [ak, m] of spendByCombo) {
+    let best = '||', bestSpend = -Infinity;
+    for (const [k, sp] of m) if (sp > bestSpend) { bestSpend = sp; best = k; }
+    const [c, s] = best.split('||');
+    adToCombo.set(ak, { c, s });
+  }
+
+  // ---------------- Sheet 2: buyers (aba 29/08) ----------------
+  const b = parseCSV(csvSales);
+  const h2 = b[0] || [];
+  const B = {
+    date: headerIndex(h2, 'Data', 'DATA', 'Data | Hora', 'Data da Compra'),
+    name: headerIndex(h2, 'Nome', 'NOME', 'Nome Completo'),
+    mail: headerIndex(h2, 'Email', 'E-mail'),
+    src:  headerIndex(h2, 'UTM Source', 'utm_source'),
+    med:  headerIndex(h2, 'UTM Medium', 'utm_medium'),
+    camp: headerIndex(h2, 'UTM Campaign', 'utm_campaign'),
+    cont: headerIndex(h2, 'UTM Content', 'utm_content'),
+  };
+  // Auto-detect a value column the moment it is added to the sheet.
+  const valIdx = headerIndex(h2, 'Valor da Compra', 'Valor', 'Bruto', 'Faturamento',
+                             'Preço', 'Preco', 'Amount', 'Value', 'Revenue', 'Valor Bruto');
+  const hasValueCol = valIdx >= 0;
+
+  const sales = [];
+  const attribution = { ad: 0, adset: 0, campaign: 0, unmatched: 0, none: 0 };
+  let trafficSales = 0, valuedFromCol = 0;
+
+  for (let i = 1; i < b.length; i++) {
+    const r = b[i];
+    if (!r || r.length < 1) continue;
+    const d = isoDate(r[B.date]);
+    if (!d) continue;
+    const name = normKey(r[B.name]);
+    const mail = normKey(B.mail >= 0 ? r[B.mail] : '');
+    const rawSrc  = String(r[B.src]  || '');
+    const rawMed  = String(r[B.med]  || '');
+    const rawCamp = String(r[B.camp] || '');
+    const rawCont = String(r[B.cont] || '');
+    const hasUtm = [rawSrc, rawMed, rawCamp, rawCont].some(isUtm);
+    // Skip placeholder/empty rows (only a date, no identity, no UTM).
+    if (!name && !mail && !hasUtm) continue;
+
+    // Value: from the sheet column if present, else the fallback ticket.
+    let value = FALLBACK_TICKET;
+    if (hasValueCol) { const vv = num(r[valIdx]); if (vv > 0) { value = vv; valuedFromCol++; } }
+
+    const paid = isPaidSource(rawSrc);
+    let src = 'organico', m = 'none', c = '', s = '', ad = '';
+    if (paid) {
+      src = 'meta-ads';
+      const uCamp = stripId(rawCamp), uSet = stripId(rawMed), uAd = cleanContent(rawCont);
+      c  = canonCamp.get(fold(uCamp)) || (isUtm(uCamp) ? uCamp : '');
+      s  = canonSet.get(fold(uSet))   || (isUtm(uSet)  ? uSet  : '');
+      ad = canonAd.get(fold(uAd))     || '';
+      // Fallback: resolve campaign/adset from the ad name's highest-spend combo.
+      if (ad && (!c || !s)) {
+        const combo = adToCombo.get(fold(ad));
+        if (combo) { if (!c) c = canonCamp.get(fold(combo.c)) || combo.c; if (!s) s = canonSet.get(fold(combo.s)) || combo.s; }
+      }
+      m = ad ? 'ad' : s ? 'adset' : c ? 'campaign' : (hasUtm ? 'unmatched' : 'none');
+      trafficSales++;
+      attribution[m]++;
+    } else if (isUtm(rawSrc)) {
+      src = fold(rawSrc);   // keep a real non-Meta source label (organico/direto/…)
+    }
+    sales.push({ d, v: Math.round(value * 100) / 100, src, m, c, s, a: ad });
+  }
+  const salesRows = sales.length;
+
+  // ---------------- Output (reference data.json contract) ----------------
+  const allDates = [...ads.map((x) => x.d), ...sales.map((x) => x.d)].sort();
+  const now = new Date();
+  const nowBR = now.toLocaleString('pt-BR', {
+    timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  }).replace(',', '');
+
+  const warnings = [];
+  if (!hasValueCol) warnings.push(`A aba "${SALES_TAB}" ainda não tem coluna de valor — receita/ROAS/ticket usam o ticket fixo de R$ ${FALLBACK_TICKET.toFixed(2)} (edite FALLBACK_TICKET no build.mjs ou adicione uma coluna "Valor da Compra").`);
+  if (attribution.none > 0)      warnings.push(`${attribution.none} venda(s) de tráfego sem UTM — contam na receita, mas ficam em "Não atribuído".`);
+  if (attribution.unmatched > 0) warnings.push(`${attribution.unmatched} venda(s) com UTM que não existe na planilha de anúncios (período fora da janela, outra conta ou UTM digitada errada).`);
+  if (attribution.adset + attribution.campaign > 0) warnings.push(`${attribution.adset + attribution.campaign} venda(s) casaram só até conjunto/campanha, não até o anúncio.`);
+  const nonTraffic = salesRows - trafficSales;
+  if (nonTraffic > 0) warnings.push(`${nonTraffic} venda(s) fora do tráfego (utm_source ≠ Meta) — orgânico/direto; entram só como referência, não no funil/CAC/ROAS.`);
+
+  const out = {
+    meta: {
+      title: 'WOP-AGO26 — Meta Ads',
+      platform: 'Meta Ads',
+      traffic_source: 'meta-ads',
+      tax: TAX_RATE,
+      currency: 'BRL',
+      generated_at: now.toISOString(),
+      generated_at_br: nowBR,
+      date_min: allDates[0] || null,
+      date_max: allDates[allDates.length - 1] || null,
+      ads_url: ADS_URL,
+      sales_url: BUYERS_URL,
+      sales_tab: SALES_TAB,
+      counts: {
+        ads_rows: ads.length,
+        sales_rows: salesRows,
+        traffic_sales: trafficSales,
+        attribution,
+      },
+      warnings,
+    },
+    ads,
+    sales,
+  };
+
+  mkdirSync('public', { recursive: true });
+  writeFileSync('public/data.json', JSON.stringify(out));
+
+  // Cache-bust: stamp the current build id into index.html.
+  try {
+    const buildId = now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+    let html = readFileSync('public/index.html', 'utf8');
+    html = html.replace(/const BUILD_ID = "[^"]*";/, `const BUILD_ID = "${buildId}";`);
+    writeFileSync('public/index.html', html);
+  } catch (e) { console.warn('BUILD_ID stamp skipped:', e.message); }
+
+  console.log('Wrote public/data.json', out.meta.counts, out.meta.date_min, '→', out.meta.date_max);
+  if (ads.length === 0) throw new Error('No ad rows parsed — aborting so the previous deploy is kept.');
+})().catch((err) => { console.error(err); process.exit(1); });
