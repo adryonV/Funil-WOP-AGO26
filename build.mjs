@@ -16,8 +16,9 @@
 //      (Valor da Compra / Valor / Bruto / Faturamento / …) the moment it is added.
 //      Until then each sale is priced at FALLBACK_TICKET (see below).
 //
-// IMPOSTO: o gasto vai CRU (bruto) no data.json; o dashboard multiplica por meta.tax
-// (×1,1385) antes de TODAS as métricas — assim nenhuma métrica escapa do imposto.
+// MOEDA: a conta de anúncios é em DÓLAR (USD). O gasto vai CRU em USD no data.json;
+// o dashboard multiplica por meta.fx (câmbio USD→BRL, buscado ao vivo a cada build)
+// para exibir TODAS as métricas de dinheiro em REAL (BRL). SEM imposto (meta.tax = 1).
 
 import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 
@@ -32,8 +33,28 @@ const SHEET_SALES = `https://docs.google.com/spreadsheets/d/${BUYERS_ID}/gviz/tq
 const ADS_URL    = `https://docs.google.com/spreadsheets/d/${ADS_ID}/edit`;
 const BUYERS_URL = `https://docs.google.com/spreadsheets/d/${BUYERS_ID}/edit`;
 
-// --- Tax on ad spend (applied in the dashboard, not here) -------------------
-const TAX_RATE = 1.1385;
+// --- Tax on ad spend --------------------------------------------------------
+// A conta é em USD → sem imposto brasileiro sobre o gasto. Deixe 1 para desligar.
+const TAX_RATE = 1;
+
+// --- Câmbio USD→BRL (buscado ao vivo a cada build) --------------------------
+const FX_SOURCE   = 'https://open.er-api.com/v6/latest/USD'; // grátis, sem chave
+const FX_FALLBACK = 5.11;  // usado só se a cotação ao vivo falhar
+async function fetchFxUsdBrl() {
+  try {
+    const r = await fetch(FX_SOURCE, { headers: { 'User-Agent': 'funnel-dashboard-build' } });
+    if (!r.ok) throw new Error(`FX HTTP ${r.status}`);
+    const j = await r.json();
+    const rate = j && j.rates && Number(j.rates.BRL);
+    if (Number.isFinite(rate) && rate > 0) {
+      return { fx: rate, date: j.time_last_update_utc || null, source: 'open.er-api.com' };
+    }
+    throw new Error('FX payload sem rates.BRL');
+  } catch (e) {
+    console.warn('FX ao vivo falhou, usando fallback:', e.message);
+    return { fx: FX_FALLBACK, date: null, source: 'fallback' };
+  }
+}
 
 // --- Fallback ticket while the buyers tab has no value column ----------------
 // Set this to the offer price (e.g. 197) if you want revenue/ROAS while the
@@ -127,9 +148,10 @@ function headerIndex(h, ...names) {
 }
 
 (async () => {
-  const [csvAds, csvSales] = await Promise.all([
+  const [csvAds, csvSales, fxInfo] = await Promise.all([
     fetchText(SHEET_ADS, 'ads sheet'),
     fetchText(SHEET_SALES, `buyers tab "${SALES_TAB}"`),
+    fetchFxUsdBrl(),
   ]);
 
   // ---------------- Sheet 1: Meta Ads metrics ----------------
@@ -262,6 +284,7 @@ function headerIndex(h, ...names) {
   }).replace(',', '');
 
   const warnings = [];
+  warnings.push(`Gasto da conta em USD → convertido para BRL a câmbio ×${fxInfo.fx.toFixed(4)} (${fxInfo.source}${fxInfo.date ? ', ' + fxInfo.date : ''}). Sem imposto.`);
   if (!hasValueCol) warnings.push(`A aba "${SALES_TAB}" ainda não tem coluna de valor — receita/ROAS/ticket usam o ticket fixo de R$ ${FALLBACK_TICKET.toFixed(2)} (edite FALLBACK_TICKET no build.mjs ou adicione uma coluna "Valor da Compra").`);
   if (attribution.none > 0)      warnings.push(`${attribution.none} venda(s) de tráfego sem UTM — contam na receita, mas ficam em "Não atribuído".`);
   if (attribution.unmatched > 0) warnings.push(`${attribution.unmatched} venda(s) com UTM que não existe na planilha de anúncios (período fora da janela, outra conta ou UTM digitada errada).`);
@@ -276,6 +299,10 @@ function headerIndex(h, ...names) {
       traffic_source: 'meta-ads',
       tax: TAX_RATE,
       currency: 'BRL',
+      spend_currency: 'USD',
+      fx: Math.round(fxInfo.fx * 1e6) / 1e6,
+      fx_date: fxInfo.date,
+      fx_source: fxInfo.source,
       generated_at: now.toISOString(),
       generated_at_br: nowBR,
       date_min: allDates[0] || null,

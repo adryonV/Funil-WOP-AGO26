@@ -13,8 +13,10 @@ sozinho **100% na nuvem** a cada 2 h. Nada roda no seu PC.
    - atribui cada venda ao anúncio pelas UTMs
      (`utm_campaign`→campanha · `utm_medium`→conjunto · `utm_content`→anúncio);
    - grava `public/data.json` **agregado, sem PII** (nomes/e-mails/telefones ficam fora).
-2. O gasto vai **cru (bruto)** no `data.json`; o dashboard multiplica por
-   `meta.tax = 1.1385` **antes de todas as métricas** (CPM, CPC, CAC, ROAS, etc.).
+2. A conta de anúncios é em **dólar (USD)**. O gasto vai **cru em US$** no
+   `data.json`; o build busca o **câmbio USD→BRL ao vivo** (open.er-api.com) e o
+   dashboard multiplica por `meta.fx` **antes de todas as métricas** (CPM, CPC,
+   CAC, ROAS, etc.), exibindo tudo em **Real (BRL)**. **Sem imposto** (`meta.tax = 1`).
 3. `actions/deploy-pages` publica `public/` no GitHub Pages.
 4. `index.html` busca `data.json?v=<BUILD_ID>&t=<timestamp>` com `cache:no-store`
    (**cache-bust** duplo) — o navegador sempre pega a versão nova.

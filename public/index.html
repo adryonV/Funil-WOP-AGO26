@@ -306,7 +306,7 @@ footer a{color:var(--series-1)}
       <p class="sub" id="subtitle">carregando…</p>
     </div>
     <div class="top-right">
-      <span class="badge tax" id="taxBadge" title="Imposto obrigatório do Meta Ads aplicado sobre o gasto bruto">imposto —</span>
+      <span class="badge tax" id="taxBadge" title="Gasto da conta em US$ convertido para R$ pelo câmbio do dia">câmbio —</span>
       <span class="badge"><span class="dot"></span><span id="updated">—</span></span>
       <button class="btn" id="reload" title="Buscar a última versão dos dados">Atualizar</button>
       <button class="btn" id="theme" title="Alternar tema claro/escuro">Claro</button>
@@ -321,7 +321,7 @@ footer a{color:var(--series-1)}
 <script>
 "use strict";
 const BUILD_ID = "20260806140033";
-const TAX_NOTE = "todas as métricas usam o gasto COM imposto";
+const TAX_NOTE = "gasto convertido de US$ para R$ pelo câmbio do dia";
 
 /* ============================================================ formatação */
 const nfInt   = new Intl.NumberFormat("pt-BR", {maximumFractionDigits:0});
@@ -330,14 +330,16 @@ const nf2     = new Intl.NumberFormat("pt-BR", {minimumFractionDigits:2, maximum
 const nfTax   = new Intl.NumberFormat("pt-BR", {maximumFractionDigits:4});
 const money   = v => (v < 0 ? "−R$ " : "R$ ") + nf2.format(Math.abs(v||0));
 const money0  = v => (v < 0 ? "−R$ " : "R$ ") + nfInt.format(Math.abs(v||0));
+const moneyUSD= v => (v < 0 ? "−US$ " : "US$ ") + nf2.format(Math.abs(v||0));
 const taxStr  = v => nfTax.format(v||1);
+const fxStr   = v => nf2.format(v||1);   // câmbio USD→BRL, 2 casas
 const pct     = v => nf2.format((v||0)*100) + "%";
 const pct1    = v => nf1.format((v||0)*100) + "%";
 const int     = v => nfInt.format(Math.round(v||0));
 const x2      = v => nf2.format(v||0) + "x";
 const dash    = f => v => (v===null || v===undefined || !isFinite(v)) ? "—" : f(v);
 
-const M  = {money:dash(money), money0:dash(money0), pct:dash(pct), pct1:dash(pct1),
+const M  = {money:dash(money), money0:dash(money0), moneyUSD:dash(moneyUSD), pct:dash(pct), pct1:dash(pct1),
             int:dash(int), x:dash(x2), n2:dash(v=>nf2.format(v))};
 
 const dayBR   = iso => { const [y,m,d] = iso.split("-"); return `${d}/${m}`; };
@@ -352,13 +354,15 @@ let STATE = {from:null, to:null, compare:true, metric:"spend", mode:"traffic", t
              treeSort:{key:"spend", dir:-1}, expanded:new Set(), goal:null, preset:"all"};
 
 /* ============================================================ métricas
-   Regra única do projeto: gasto = gasto bruto x imposto. Toda métrica derivada
-   abaixo consome `spend`, então nenhuma delas pode escapar do imposto.        */
+   Conta em USD: `gross` = gasto cru em US$; `spend` = gross × câmbio (USD→BRL),
+   em REAL. Toda métrica de dinheiro consome `spend`, então todas saem em BRL.
+   Sem imposto (meta.tax = 1). A receita das vendas (rev) já está em BRL.        */
 function blank(){
   return {spend:0, gross:0, imp:0, clk:0, lpv:0, ic:0, sales:0, rev:0};
 }
 function accAd(t, r, tax){
-  t.gross += r.spend; t.spend += r.spend * tax;
+  const fx = (DATA.meta && DATA.meta.fx) || 1;   // câmbio USD→BRL
+  t.gross += r.spend; t.spend += r.spend * tax * fx;
   t.imp += r.imp; t.clk += r.clk; t.lpv += r.lpv; t.ic += r.ic;
 }
 function accSale(t, s){ t.sales += 1; t.rev += s.v; }
@@ -728,7 +732,7 @@ function stageStatus(v, band){
    Definida pelo cliente: Investimento → CPM → CPC → CTR → CR → LP/Checkout →
    Checkouts → Custo Checkout → Vendas → CAC → ROAS → Conv. Checkout → Conv. LP. */
 const METRIC_COLS = [
-  {k:"spend",    label:"Invest.",     fmt:M.money,  hint:"Investimento com imposto"},
+  {k:"spend",    label:"Invest.",     fmt:M.money,  hint:"Investimento em R$ (gasto convertido de US$)"},
   {k:"cpm",      label:"CPM",         fmt:M.money,  hint:"Custo por mil impressões", scale:"low"},
   {k:"cpc",      label:"CPC",         fmt:M.money,  hint:"Custo por clique", scale:"low"},
   {k:"ctr",      label:"CTR",         fmt:M.pct1,   hint:"Cliques ÷ impressões"},
@@ -805,7 +809,7 @@ function render(){
     : (cacOk ? `<span class="up">✓ dentro do limite (${M.money(CAC_GOAL)})</span>`
              : `<span class="down">▲ acima do limite (${M.money(CAC_GOAL)})</span>`);
   document.getElementById("hero").innerHTML = `
-    <div class="hcard"><div class="hk">💸 Investimento <small>com imposto</small></div>
+    <div class="hcard"><div class="hk">💸 Investimento <small>em R$</small></div>
       <div class="hv">${M.money(cur.spend)}</div><div class="hd">${miniDelta(cur.spend,prev.spend,null)} vs anterior</div></div>
     <div class="op">→</div>
     <div class="hcard"><div class="hk">💰 Receita</div>
@@ -836,24 +840,24 @@ function render(){
   const rows = daily(from, to);
   const pRows = daily(pFrom, pTo);
   comboChart(document.getElementById("chA"), rows, {
-    bars:[{key:"spend", color:"var(--critical)", name:"Investimento c/ imposto"}],
+    bars:[{key:"spend", color:"var(--critical)", name:"Investimento (R$)"}],
     line:{key:"sales", color:"var(--good)", name:"Vendas"},
     leftFmt:M.money0, rightFmt:M.int, lineFmt:M.int, labelBars:true, labelLine:true
   });
   comboChart(document.getElementById("chB"), rows, {
     bars:[{key:"rev", color:"var(--good)", name:"Faturamento"},
-          {key:"spend", color:"var(--critical)", name:"Investimento c/ imposto"}],
+          {key:"spend", color:"var(--critical)", name:"Investimento (R$)"}],
     line:{key:"roas", color:"var(--ink-1)", name:"ROAS"},
     leftFmt:M.money0, rightFmt:M.x, lineFmt:M.x, labelBars:false, labelLine:true
   });
   const lgSq = c => `<i style="background:${c}"></i>`;
   const lgLn = c => `<i style="width:15px;height:0;border-top:2px solid ${c};border-radius:0"></i>`;
   document.getElementById("legA").innerHTML =
-    `<span>${lgSq("var(--critical)")}<span style="color:var(--ink-2)">Investimento c/ imposto</span></span>` +
+    `<span>${lgSq("var(--critical)")}<span style="color:var(--ink-2)">Investimento (R$)</span></span>` +
     `<span>${lgLn("var(--good)")}<span style="color:var(--ink-2)">Vendas (eixo dir.)</span></span>`;
   document.getElementById("legB").innerHTML =
     `<span>${lgSq("var(--good)")}<span style="color:var(--ink-2)">Faturamento</span></span>` +
-    `<span>${lgSq("var(--critical)")}<span style="color:var(--ink-2)">Investimento c/ imposto</span></span>` +
+    `<span>${lgSq("var(--critical)")}<span style="color:var(--ink-2)">Investimento (R$)</span></span>` +
     `<span>${lgLn("var(--ink-1)")}<span style="color:var(--ink-2)">ROAS (eixo dir.)</span></span>`;
 
   const met = METRICS.find(m => m.k === STATE.metric) || METRICS[0];
@@ -939,7 +943,7 @@ function gauge(score, colorVar){
 function renderFunnel(cur){
   const stages = [
     {n:"Investimento", big:M.money(cur.spend), bg:"#8fe01e", ink:"#0c1400", goal:true,
-      cl:"Gasto bruto", cv:M.money(cur.gross), sub:`+ imposto ×${taxStr(DATA.meta.tax)} = <b>${M.money(cur.spend)}</b>`},
+      cl:"Gasto (US$)", cv:M.moneyUSD(cur.gross), sub:`× câmbio ${fxStr(DATA.meta.fx)} = <b>${M.money(cur.spend)}</b>`},
     {n:"Impressões", big:M.int(cur.imp), bg:"#7ecb1c", ink:"#0c1400",
       cl:"CPM", cv:M.money(cur.cpm), sub:`CTR <b>${M.pct1(cur.ctr)}</b>`},
     {n:"Cliques", big:M.int(cur.clk), bg:"#63b015", ink:"#0c1400",
@@ -1363,10 +1367,10 @@ function shell(){
     `<b style="color:var(--ink-2)">${int(m.counts.traffic_sales)} vendas de tráfego</b> de ${int(m.counts.sales_rows)} no total`;
   document.getElementById("updated").textContent = "atualizado " + m.generated_at_br;
   document.getElementById("taxBadge").textContent =
-    m.tax === 1 ? "sem imposto" : `imposto ×${taxStr(m.tax)} aplicado`;
-  document.getElementById("taxBadge").title = m.tax === 1
-    ? "Nenhum imposto aplicado sobre o gasto."
-    : `Gasto bruto × ${m.tax} — ${TAX_NOTE}.`;
+    m.fx ? `câmbio US$→R$ ×${fxStr(m.fx)}` : (m.tax === 1 ? "sem imposto" : `imposto ×${taxStr(m.tax)} aplicado`);
+  document.getElementById("taxBadge").title = m.fx
+    ? `Gasto da conta em US$ convertido para R$ ×${fxStr(m.fx)}${m.fx_date ? " (" + m.fx_date + ")" : ""} — sem imposto.`
+    : (m.tax === 1 ? "Nenhum imposto aplicado sobre o gasto." : `Gasto bruto × ${m.tax} — ${TAX_NOTE}.`);
 
   const at = m.counts.attribution;
   const okSales = at.ad + at.adset + at.campaign;
@@ -1420,7 +1424,7 @@ function shell(){
       </div>
       <div class="panel">
         <h2>Resultados por dia</h2>
-        <p class="note">Barras = <b style="color:var(--ink-2)">Investimento c/ imposto</b> (eixo esq., R$) ·
+        <p class="note">Barras = <b style="color:var(--ink-2)">Investimento (R$)</b> (eixo esq., R$) ·
           linha = <b style="color:var(--ink-2)">Vendas</b> (eixo dir., nº).</p>
         <div class="legend" id="legA"></div>
         <div id="chA"></div>
@@ -1466,9 +1470,9 @@ function shell(){
     <div id="reportView" hidden></div>
 
     <footer>
-      Gasto bruto do período completo: ${money(DATA.ads.reduce((s,r)=>s+r.spend,0))} ·
-      com imposto ×${taxStr(m.tax)}: ${money(DATA.ads.reduce((s,r)=>s+r.spend,0)*m.tax)}.
-      ${TAX_NOTE[0].toUpperCase()+TAX_NOTE.slice(1)}.<br>
+      Gasto do período completo: ${moneyUSD(DATA.ads.reduce((s,r)=>s+r.spend,0))} ·
+      em R$ (câmbio ×${fxStr(m.fx||1)}${m.fx_date ? ", " + m.fx_date : ""}): ${money(DATA.ads.reduce((s,r)=>s+r.spend,0)*(m.fx||1)*(m.tax||1))}.
+      ${TAX_NOTE[0].toUpperCase()+TAX_NOTE.slice(1)}${m.fx_source==='fallback' ? " (cotação de fallback — câmbio ao vivo indisponível no build)" : ""}.<br>
       Vendas atribuídas por UTM → hierarquia do Meta: ${at.ad} no anúncio, ${at.adset} até o conjunto,
       ${at.campaign} até a campanha, ${at.unmatched} com UTM desconhecida, ${at.none} sem UTM.
       A venda entra no dia em que foi paga, não no dia do clique.<br>
