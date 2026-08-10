@@ -350,7 +350,7 @@ const escape_ = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",
 
 /* ============================================================ estado */
 let DATA = null;
-let STATE = {from:null, to:null, compare:true, metric:"spend", mode:"traffic", tab:"traffic",
+let STATE = {from:null, to:null, compare:true, metric:"spend", mode:"total", tab:"total",
              treeSort:{key:"spend", dir:-1}, expanded:new Set(), goal:null, preset:"all"};
 
 /* ============================================================ métricas
@@ -706,8 +706,8 @@ const SUB = [
 ];
 
 /* Saúde do funil ancorada no NÚMERO DO CLIENTE, não em benchmark de mercado:
-   teto de CAC = R$ 110. Tudo (bandas, ROAS, tetos de CPC/CPM) é derivado dele. */
-const CAC_GOAL = 110;   // teto de CAC definido pelo cliente (R$)
+   teto de CAC = R$ 57. Tudo (bandas, ROAS, tetos de CPC/CPM) é derivado dele. */
+const CAC_GOAL = 57;    // teto de CAC definido pelo cliente (R$)
 const TICKET   = 29;    // ticket do produto (R$) — usado só p/ derivar o piso de ROAS = ticket/teto
 
 /* Bandas de referência do funil pós-clique (rules-of-thumb de mercado, EDITÁVEIS).
@@ -892,13 +892,14 @@ function miniDelta(cur, prev, better){
 
 /* ============================================================ saúde geral */
 /* Nota 0–100 a partir do "% do teto" (pct = valor ÷ teto, p/ métricas de custo).
-   Bandas do cliente: ≤60% Saudável · 60–80% Bom · 80–100% Atenção · >100% Crítico. */
+   Regra: DENTRO do teto (≤100%) = 100% de saúde (Saudável). Acima do teto degrada:
+   100–125% Bom · 125–150% Atenção · >150% Crítico (zera em 200% do teto). */
 function bandScore(pct){
   if (pct == null || !isFinite(pct)) return null;
-  if (pct <= 0.6) return 100 - (pct/0.6)*20;          // 100 → 80  (Saudável)
-  if (pct <= 0.8) return 80  - ((pct-0.6)/0.2)*20;    //  80 → 60  (Bom)
-  if (pct <= 1.0) return 60  - ((pct-0.8)/0.2)*20;    //  60 → 40  (Atenção)
-  return Math.max(0, 40 - (pct-1)*40);                //  40 → 0   (Crítico, zera em 200% do teto)
+  if (pct <= 1.0)  return 100;                          // dentro do teto = 100% (Saudável)
+  if (pct <= 1.25) return 100 - ((pct-1.0)/0.25)*20;    // 100 → 80  (Bom)
+  if (pct <= 1.5)  return 80  - ((pct-1.25)/0.25)*20;   //  80 → 60  (Atenção)
+  return Math.max(0, 60 - (pct-1.5)*120);               //  60 → 0   (Crítico, zera em 200% do teto)
 }
 const scoreColor = s => s == null ? "var(--ink-3)" : s >= 60 ? "var(--good)" : s >= 40 ? "var(--warning)" : "var(--critical)";
 const bandLabel  = s => s == null ? "sem vendas" : s >= 80 ? "Saudável" : s >= 60 ? "Bom" : s >= 40 ? "Atenção" : "Crítico";
@@ -1525,14 +1526,15 @@ function shell(){
   };
 
   // abas: Visão Geral (todas) · Tráfego Pago (meta-ads) · Relatório
-  try { const tv = localStorage.getItem("funnel-tab"); if (["total","traffic","report"].includes(tv)) STATE.tab = tv; } catch(e){}
+  // chave "-v2": ignora preferência antiga salva (padrão passou a ser Visão Geral)
+  try { const tv = localStorage.getItem("funnel-tab-v2"); if (["total","traffic","report"].includes(tv)) STATE.tab = tv; } catch(e){}
   if (STATE.tab !== "report") STATE.mode = STATE.tab;
   document.querySelectorAll("[data-tab]").forEach(b => {
     b.setAttribute("aria-selected", b.dataset.tab === STATE.tab);
     b.onclick = () => {
       STATE.tab = b.dataset.tab;
       if (STATE.tab !== "report") STATE.mode = STATE.tab;
-      try { localStorage.setItem("funnel-tab", STATE.tab); } catch(e){}
+      try { localStorage.setItem("funnel-tab-v2", STATE.tab); } catch(e){}
       document.querySelectorAll("[data-tab]").forEach(x => x.setAttribute("aria-selected", x.dataset.tab === STATE.tab));
       refresh();
     };
