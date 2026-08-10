@@ -57,10 +57,10 @@ async function fetchFxUsdBrl() {
 }
 
 // --- Fallback ticket while the buyers tab has no value column ----------------
-// Set this to the offer price (e.g. 197) if you want revenue/ROAS while the
-// sheet still has no "Valor da Compra" column. 0 = revenue stays zero until the
-// column is added (the build then reads it automatically).
-const FALLBACK_TICKET = 0;
+// Regra do cliente (2026-08-10): considerar que TODA venda trouxe R$ 57 de receita.
+// Se um dia a aba ganhar uma coluna "Valor da Compra", o build passa a usar o valor
+// real de cada linha automaticamente; enquanto não, cada venda vale este ticket.
+const FALLBACK_TICKET = 57;
 
 // --- utm_source values that mean "paid Meta traffic" ------------------------
 const isPaidSource = (s) => /^(fb|facebook|facebook[-\s]?ads|meta|meta[-\s]?ads|ig|instagram)$/i.test(String(s || '').trim());
@@ -285,7 +285,7 @@ function headerIndex(h, ...names) {
 
   const warnings = [];
   warnings.push(`Gasto da conta em USD → convertido para BRL a câmbio ×${fxInfo.fx.toFixed(4)} (${fxInfo.source}${fxInfo.date ? ', ' + fxInfo.date : ''}). Sem imposto.`);
-  if (!hasValueCol) warnings.push(`A aba "${SALES_TAB}" ainda não tem coluna de valor — receita/ROAS/ticket usam o ticket fixo de R$ ${FALLBACK_TICKET.toFixed(2)} (edite FALLBACK_TICKET no build.mjs ou adicione uma coluna "Valor da Compra").`);
+  if (!hasValueCol) warnings.push(`Receita estimada por regra do cliente: cada venda vale R$ ${FALLBACK_TICKET.toFixed(2)} (a aba "${SALES_TAB}" não tem coluna de valor). Adicione uma coluna "Valor da Compra" para usar o valor real de cada venda.`);
   if (attribution.none > 0)      warnings.push(`${attribution.none} venda(s) de tráfego sem UTM — contam na receita, mas ficam em "Não atribuído".`);
   if (attribution.unmatched > 0) warnings.push(`${attribution.unmatched} venda(s) com UTM que não existe na planilha de anúncios (período fora da janela, outra conta ou UTM digitada errada).`);
   if (attribution.adset + attribution.campaign > 0) warnings.push(`${attribution.adset + attribution.campaign} venda(s) casaram só até conjunto/campanha, não até o anúncio.`);
