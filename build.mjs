@@ -8,10 +8,11 @@
 //   1) Métricas dos Anúncios — aba "Meta Ads": Day / Campaign Name / Ad Set Name /
 //      Ad Name / Amount Spent / Impressions / Link Clicks / Landing Page Views /
 //      Checkouts Initiated. One row per day×campaign×conjunto×anúncio.
-//   2) Lista de Compradores — aba "29/08": Data / Nome / Email / Telefone / Status /
-//      UTM Source / UTM Medium / UTM Campaign / UTM Content / UTM Term / UTM id.
-//      One row per sale. Attribution comes from the UTMs:
-//        utm_campaign → Campaign Name · utm_medium → Ad Set Name · utm_content → Ad Name.
+//   2) Lista de Compradores — aba "29/08": Data / Nome / ... / UTM Source / UTM Medium /
+//      UTM Campaign / UTM Content / UTM Term / UTM id / SCK.
+//      One row per sale. ATRIBUIÇÃO DO CRIATIVO vem da coluna SCK (Site Custom Key do
+//      Meta), cujo ÚLTIMO segmento é o nome do anúncio — o utm_content desta conta vem
+//      errado (traz a fase da campanha, não o anúncio). UTM é só fallback quando não há SCK.
 //      VALUE: this tab has no price column yet. The build AUTO-DETECTS a value column
 //      (Valor da Compra / Valor / Bruto / Faturamento / …) the moment it is added.
 //      Until then each sale is priced at FALLBACK_TICKET (see below).
@@ -212,6 +213,44 @@ function headerIndex(h, ...names) {
     adToCombo.set(ak, { c, s });
   }
 
+  // (anúncio + conjunto) → campanha de maior gasto — resolve a campanha exata quando
+  // a SCK nos dá o par anúncio/conjunto (um mesmo anúncio roda em 2 campanhas).
+  const campByAdSet = new Map(); // "fold(ad)|fold(set)" -> Map(campanha -> gasto)
+  for (const r of ads) {
+    if (!r.a) continue;
+    const k = fold(r.a) + '|' + fold(r.s);
+    const mm = campByAdSet.get(k) || new Map();
+    mm.set(r.c, (mm.get(r.c) || 0) + r.spend);
+    campByAdSet.set(k, mm);
+  }
+  const campForAdSet = (adFold, setFold) => {
+    const mm = campByAdSet.get(adFold + '|' + setFold);
+    if (!mm) return '';
+    let best = '', bs = -Infinity;
+    for (const [c, sp] of mm) if (sp > bs) { bs = sp; best = c; }
+    return best;
+  };
+
+  // SCK (Site Custom Key do Meta): "<source>|<conjunto>|<campanha>|<placement>|<ANÚNCIO>".
+  // O ANÚNCIO (criativo) é o último segmento e é a atribuição mais confiável — o
+  // utm_content desta conta vem errado (traz "E4-VEN", não o nome do anúncio).
+  // A campanha tem " | " interno, então NÃO dá pra pegar por posição fixa: varremos
+  // os segmentos e casamos com os nomes reais da planilha de anúncios (canonAd/canonSet).
+  const sckSegments = (s) => String(s == null ? '' : s).split('|').map((p) => normKey(p));
+  const adFromSck = (segs) => {                 // varre do fim: 1º segmento que é um anúncio conhecido
+    for (let i = segs.length - 1; i >= 0; i--) { const c = canonAd.get(fold(segs[i])); if (c) return c; }
+    return '';
+  };
+  const setFromSck = (segs) => {                // 1º segmento que casa com um conjunto conhecido
+    for (const p of segs) { const c = canonSet.get(fold(p)); if (c) return c; }
+    return '';
+  };
+  const campFromSck = (rawSck) => {             // a campanha (com " | " interno) aparece inteira na SCK
+    const hay = fold(rawSck);
+    for (const [cf, orig] of canonCamp) if (cf && hay.includes(cf)) return orig;
+    return '';
+  };
+
   // ---------------- Sheet 2: buyers (aba 29/08) ----------------
   const b = parseCSV(csvSales);
   const h2 = b[0] || [];
@@ -223,6 +262,7 @@ function headerIndex(h, ...names) {
     med:  headerIndex(h2, 'UTM Medium', 'utm_medium'),
     camp: headerIndex(h2, 'UTM Campaign', 'utm_campaign'),
     cont: headerIndex(h2, 'UTM Content', 'utm_content'),
+    sck:  headerIndex(h2, 'SCK', 'sck', 'Site Custom Key'),
   };
   // Auto-detect a value column the moment it is added to the sheet.
   const valIdx = headerIndex(h2, 'Valor da Compra', 'Valor', 'Bruto', 'Faturamento',
@@ -231,7 +271,7 @@ function headerIndex(h, ...names) {
 
   const sales = [];
   const attribution = { ad: 0, adset: 0, campaign: 0, unmatched: 0, none: 0 };
-  let trafficSales = 0, valuedFromCol = 0;
+  let trafficSales = 0, valuedFromCol = 0, sckAttributed = 0;
 
   for (let i = 1; i < b.length; i++) {
     const r = b[i];
@@ -244,6 +284,7 @@ function headerIndex(h, ...names) {
     const rawMed  = String(r[B.med]  || '');
     const rawCamp = String(r[B.camp] || '');
     const rawCont = String(r[B.cont] || '');
+    const rawSck  = String(B.sck >= 0 ? r[B.sck] : '');
     const hasUtm = [rawSrc, rawMed, rawCamp, rawCont].some(isUtm);
     // Skip placeholder/empty rows (only a date, no identity, no UTM).
     if (!name && !mail && !hasUtm) continue;
@@ -256,14 +297,26 @@ function headerIndex(h, ...names) {
     let src = 'organico', m = 'none', c = '', s = '', ad = '';
     if (paid) {
       src = 'meta-ads';
-      const uCamp = stripId(rawCamp), uSet = stripId(rawMed), uAd = cleanContent(rawCont);
-      c  = canonCamp.get(fold(uCamp)) || (isUtm(uCamp) ? uCamp : '');
-      s  = canonSet.get(fold(uSet))   || (isUtm(uSet)  ? uSet  : '');
-      ad = canonAd.get(fold(uAd))     || '';
-      // Fallback: resolve campaign/adset from the ad name's highest-spend combo.
-      if (ad && (!c || !s)) {
-        const combo = adToCombo.get(fold(ad));
-        if (combo) { if (!c) c = canonCamp.get(fold(combo.c)) || combo.c; if (!s) s = canonSet.get(fold(combo.s)) || combo.s; }
+      // 1) SCK primeiro: o criativo é o último segmento (utm_content vem errado nesta conta).
+      const segs = sckSegments(rawSck);
+      ad = adFromSck(segs);
+      s  = setFromSck(segs);
+      if (ad) {                                   // campanha: 1º da própria SCK, senão do par anúncio+conjunto
+        const cc = campFromSck(rawSck) || campForAdSet(fold(ad), fold(s)) || (adToCombo.get(fold(ad)) || {}).c || '';
+        c = canonCamp.get(fold(cc)) || cc;
+        if (!s) { const combo = adToCombo.get(fold(ad)); if (combo) s = canonSet.get(fold(combo.s)) || combo.s; }
+        sckAttributed++;
+      }
+      // 2) Fallback UTM se a SCK não resolveu o anúncio.
+      if (!ad) {
+        const uCamp = stripId(rawCamp), uSet = stripId(rawMed), uAd = cleanContent(rawCont);
+        c  = canonCamp.get(fold(uCamp)) || (isUtm(uCamp) ? uCamp : '');
+        s  = s || canonSet.get(fold(uSet)) || (isUtm(uSet) ? uSet : '');
+        ad = canonAd.get(fold(uAd)) || '';
+        if (ad && (!c || !s)) {
+          const combo = adToCombo.get(fold(ad));
+          if (combo) { if (!c) c = canonCamp.get(fold(combo.c)) || combo.c; if (!s) s = canonSet.get(fold(combo.s)) || combo.s; }
+        }
       }
       m = ad ? 'ad' : s ? 'adset' : c ? 'campaign' : (hasUtm ? 'unmatched' : 'none');
       trafficSales++;
@@ -285,6 +338,7 @@ function headerIndex(h, ...names) {
 
   const warnings = [];
   warnings.push(`Gasto da conta em USD → convertido para BRL a câmbio ×${fxInfo.fx.toFixed(4)} (${fxInfo.source}${fxInfo.date ? ', ' + fxInfo.date : ''}). Sem imposto.`);
+  if (sckAttributed > 0) warnings.push(`${sckAttributed} venda(s) de tráfego atribuídas ao CRIATIVO pela coluna SCK (utm_content vem errado nesta conta).`);
   if (!hasValueCol) warnings.push(`Receita estimada por regra do cliente: cada venda vale R$ ${FALLBACK_TICKET.toFixed(2)} (a aba "${SALES_TAB}" não tem coluna de valor). Adicione uma coluna "Valor da Compra" para usar o valor real de cada venda.`);
   if (attribution.none > 0)      warnings.push(`${attribution.none} venda(s) de tráfego sem UTM — contam na receita, mas ficam em "Não atribuído".`);
   if (attribution.unmatched > 0) warnings.push(`${attribution.unmatched} venda(s) com UTM que não existe na planilha de anúncios (período fora da janela, outra conta ou UTM digitada errada).`);
