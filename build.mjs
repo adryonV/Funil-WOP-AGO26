@@ -237,18 +237,19 @@ function headerIndex(h, ...names) {
   // A campanha tem " | " interno, então NÃO dá pra pegar por posição fixa: varremos
   // os segmentos e casamos com os nomes reais da planilha de anúncios (canonAd/canonSet).
   const sckSegments = (s) => String(s == null ? '' : s).split('|').map((p) => normKey(p));
-  const adFromSck = (segs) => {                 // varre do fim: 1º segmento que é um anúncio conhecido
-    for (let i = segs.length - 1; i >= 0; i--) { const c = canonAd.get(fold(segs[i])); if (c) return c; }
-    return '';
-  };
-  const setFromSck = (segs) => {                // 1º segmento que casa com um conjunto conhecido
-    for (const p of segs) { const c = canonSet.get(fold(p)); if (c) return c; }
-    return '';
-  };
-  const campFromSck = (rawSck) => {             // a campanha (com " | " interno) aparece inteira na SCK
+  // Casa o MAIOR nome conhecido presente como substring na SCK. Necessário porque
+  // conjunto e campanha têm " | " interno (ex.: conjunto "...Mix quente | AD09",
+  // campanha "WOP-AGO26 | E4-VEN | ... | Teste de Criativos") — split por "|" quebra
+  // esses nomes, então casar por inclusão (pegando o mais longo) recupera o certo.
+  const longestInSck = (rawSck, canonMap) => {
     const hay = fold(rawSck);
-    for (const [cf, orig] of canonCamp) if (cf && hay.includes(cf)) return orig;
-    return '';
+    let best = '', bestLen = 0;
+    for (const [cf, orig] of canonMap) if (cf && cf.length > bestLen && hay.includes(cf)) { bestLen = cf.length; best = orig; }
+    return best;
+  };
+  const adFromSck = (rawSck, segs) => {         // criativo = último segmento; senão, maior anúncio casado na SCK
+    for (let i = segs.length - 1; i >= 0; i--) { const c = canonAd.get(fold(segs[i])); if (c) return c; }
+    return longestInSck(rawSck, canonAd);
   };
 
   // ---------------- Sheet 2: buyers (aba 29/08) ----------------
@@ -298,11 +299,12 @@ function headerIndex(h, ...names) {
     if (paid) {
       src = 'meta-ads';
       // 1) SCK primeiro: o criativo é o último segmento (utm_content vem errado nesta conta).
+      //    Conjunto e campanha são casados pelo MAIOR nome conhecido na SCK (têm "|" interno).
       const segs = sckSegments(rawSck);
-      ad = adFromSck(segs);
-      s  = setFromSck(segs);
-      if (ad) {                                   // campanha: 1º da própria SCK, senão do par anúncio+conjunto
-        const cc = campFromSck(rawSck) || campForAdSet(fold(ad), fold(s)) || (adToCombo.get(fold(ad)) || {}).c || '';
+      ad = adFromSck(rawSck, segs);
+      s  = longestInSck(rawSck, canonSet);
+      if (ad) {                                   // campanha da própria SCK; senão, par anúncio+conjunto
+        const cc = longestInSck(rawSck, canonCamp) || campForAdSet(fold(ad), fold(s)) || (adToCombo.get(fold(ad)) || {}).c || '';
         c = canonCamp.get(fold(cc)) || cc;
         if (!s) { const combo = adToCombo.get(fold(ad)); if (combo) s = canonSet.get(fold(combo.s)) || combo.s; }
         sckAttributed++;
