@@ -266,9 +266,13 @@ function headerIndex(h, ...names) {
     sck:  headerIndex(h2, 'SCK', 'sck', 'Site Custom Key'),
   };
   // Auto-detect a value column the moment it is added to the sheet.
-  const valIdx = headerIndex(h2, 'Valor da Compra', 'Valor', 'Bruto', 'Faturamento',
-                             'Preço', 'Preco', 'Amount', 'Value', 'Revenue', 'Valor Bruto');
+  const valIdx = headerIndex(h2, 'Valor Líquido', 'Valor Liquido', 'Valor da Compra', 'Valor',
+                             'Bruto', 'Valor Bruto', 'Faturamento', 'Preço', 'Preco',
+                             'Amount', 'Value', 'Revenue');
   const hasValueCol = valIdx >= 0;
+  // Coluna de moeda por linha (o valor desta conta vem em USD → converte p/ BRL).
+  const moedaIdx = headerIndex(h2, 'Moeda Líquido', 'Moeda Liquido', 'Moeda', 'Currency');
+  const isBRL = (s) => /brl|r\$|real|reais/.test(fold(s));   // qualquer outra coisa (USD/vazio) = converte
 
   const sales = [];
   const attribution = { ad: 0, adset: 0, campaign: 0, unmatched: 0, none: 0 };
@@ -291,8 +295,17 @@ function headerIndex(h, ...names) {
     if (!name && !mail && !hasUtm) continue;
 
     // Value: from the sheet column if present, else the fallback ticket.
+    // A coluna "Valor Líquido" vem em USD → converte p/ BRL (o data.json guarda a
+    // receita já em R$, pois o dashboard usa s.v direto). BRL fica como está.
     let value = FALLBACK_TICKET;
-    if (hasValueCol) { const vv = num(r[valIdx]); if (vv > 0) { value = vv; valuedFromCol++; } }
+    if (hasValueCol) {
+      const vv = num(r[valIdx]);
+      if (vv > 0) {
+        const brl = (moedaIdx >= 0 && isBRL(r[moedaIdx])) ? vv : vv * fxInfo.fx;
+        value = Math.round(brl * 100) / 100;
+        valuedFromCol++;
+      }
+    }
 
     const paid = isPaidSource(rawSrc);
     let src = 'organico', m = 'none', c = '', s = '', ad = '';
@@ -341,7 +354,13 @@ function headerIndex(h, ...names) {
   const warnings = [];
   warnings.push(`Gasto da conta em USD → convertido para BRL a câmbio ×${fxInfo.fx.toFixed(4)} (${fxInfo.source}${fxInfo.date ? ', ' + fxInfo.date : ''}). Sem imposto.`);
   if (sckAttributed > 0) warnings.push(`${sckAttributed} venda(s) de tráfego atribuídas ao CRIATIVO pela coluna SCK (utm_content vem errado nesta conta).`);
-  if (!hasValueCol) warnings.push(`Receita estimada por regra do cliente: cada venda vale R$ ${FALLBACK_TICKET.toFixed(2)} (a aba "${SALES_TAB}" não tem coluna de valor). Adicione uma coluna "Valor da Compra" para usar o valor real de cada venda.`);
+  if (hasValueCol) {
+    warnings.push(`Receita = coluna "${normKey(h2[valIdx])}" (em US$) convertida para R$ a câmbio ×${fxInfo.fx.toFixed(4)}.`);
+    const noVal = salesRows - valuedFromCol;
+    if (noVal > 0) warnings.push(`${noVal} venda(s) sem valor na coluna — receita estimada em R$ ${FALLBACK_TICKET.toFixed(2)} cada (fallback).`);
+  } else {
+    warnings.push(`Receita estimada por regra do cliente: cada venda vale R$ ${FALLBACK_TICKET.toFixed(2)} (a aba "${SALES_TAB}" não tem coluna de valor).`);
+  }
   if (attribution.none > 0)      warnings.push(`${attribution.none} venda(s) de tráfego sem UTM — contam na receita, mas ficam em "Não atribuído".`);
   if (attribution.unmatched > 0) warnings.push(`${attribution.unmatched} venda(s) com UTM que não existe na planilha de anúncios (período fora da janela, outra conta ou UTM digitada errada).`);
   if (attribution.adset + attribution.campaign > 0) warnings.push(`${attribution.adset + attribution.campaign} venda(s) casaram só até conjunto/campanha, não até o anúncio.`);
