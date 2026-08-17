@@ -204,6 +204,15 @@ button,select,input{font:inherit;color:inherit}
 /* ---------------------------------------------------------------- tabelas */
 .tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
 .tblwrap{overflow-x:auto;margin:0 -18px;padding:0 18px}
+.optbar{display:flex;align-items:center;gap:8px;margin:0 0 12px;padding:7px 11px;border:1px solid var(--ring);
+  border-radius:9px;background:var(--plane);color:var(--ink-3);max-width:460px}
+.optbar:focus-within{border-color:var(--brand);color:var(--ink-2)}
+.optbar input{flex:1;border:none;background:transparent;color:var(--ink-1);font:inherit;font-size:13px;outline:none;padding:0}
+.optbar input::placeholder{color:var(--ink-3)}
+.optbar button{border:none;background:transparent;color:var(--ink-3);cursor:pointer;font-size:13px;line-height:1;padding:2px 4px;border-radius:5px}
+.optbar button:hover{color:var(--ink-1);background:color-mix(in srgb,var(--ink-3) 14%,transparent)}
+/* Visão diária: no máx. ~10 linhas visíveis; passa disso, rola (cabeçalho e média fixos). */
+.tblwrap.scrolly{overflow-y:auto}
 table{border-collapse:collapse;width:100%;font-size:13px;min-width:1080px}
 th,td{padding:9px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--grid)}
 th:first-child,td:first-child{text-align:left;white-space:normal;min-width:270px;max-width:420px}
@@ -351,7 +360,10 @@ const escape_ = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",
 /* ============================================================ estado */
 let DATA = null;
 let STATE = {from:null, to:null, compare:true, metric:"spend", mode:"total", tab:"total",
-             treeSort:{key:"spend", dir:-1}, expanded:new Set(), goal:null, preset:"all"};
+             treeSort:{key:"spend", dir:-1}, expanded:new Set(), goal:null, preset:"all", optSearch:""};
+
+/* Normaliza p/ busca: minúsculas, sem acento. */
+const norm = s => String(s == null ? "" : s).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 
 /* ============================================================ métricas
    Conta em USD: `gross` = gasto cru em US$; `spend` = gross × câmbio (USD→BRL),
@@ -1017,20 +1029,46 @@ function sortNodes(list, key, dir){
     return dir * (av - bv);
   });
 }
-function flatten(camps){
+function flatten(camps, expandedSet){
+  const exp = expandedSet || STATE.expanded;
   const {key, dir} = STATE.treeSort, out = [];
   for (const c of sortNodes(camps, key, dir)){
     out.push(c);
-    if (STATE.expanded.has(c.key)) for (const s of sortNodes(c.kids, key, dir)){
+    if (exp.has(c.key)) for (const s of sortNodes(c.kids, key, dir)){
       out.push(s);
-      if (STATE.expanded.has(s.key)) for (const a of sortNodes(s.kids, key, dir)) out.push(a);
+      if (exp.has(s.key)) for (const a of sortNodes(s.kids, key, dir)) out.push(a);
     }
   }
   return out;
 }
 
+/* Filtra a árvore por nome (campanha/conjunto/anúncio). Mantém os ancestrais de
+   qualquer nó que casa e, se um nó casa, mantém todos os seus filhos. Devolve
+   também o conjunto de chaves a auto-expandir para revelar os matches. */
+function filterOptTree(camps, q){
+  const nf = norm(q);
+  const expand = new Set();
+  const rec = (nodes) => {
+    const out = [];
+    for (const n of nodes){
+      const self = norm(n.label).includes(nf);
+      const kids = (n.kids && n.kids.length) ? rec(n.kids) : [];
+      if (self || kids.length){
+        const keptKids = self ? n.kids : kids;
+        out.push(Object.assign({}, n, {kids:keptKids}));
+        if (keptKids.length) expand.add(n.key);
+      }
+    }
+    return out;
+  };
+  return {camps:rec(camps), expand};
+}
+
 function renderOpt(){
-  const {camps, un} = buildTree(STATE.from, STATE.to);
+  let {camps, un} = buildTree(STATE.from, STATE.to);
+  const q = (STATE.optSearch || "").trim();
+  let expandSet = STATE.expanded;
+  if (q){ const f = filterOptTree(camps, q); camps = f.camps; expandSet = f.expand; }
   const {key, dir} = STATE.treeSort;
 
   // Escala de cor calibrada no nível de campanha (baseline estável).
@@ -1056,7 +1094,7 @@ function renderOpt(){
 
   const rowHTML = r => {
     const exp = r.level < 2 && r.kids && r.kids.length > 0;
-    const open = STATE.expanded.has(r.key);
+    const open = expandSet.has(r.key);
     const caret = `<span class="caret">${exp ? "▸" : ""}</span>`;
     return `<tr class="lv${r.level}${exp ? " exp" : ""}${open ? " open" : ""}" data-key="${encodeURIComponent(r.key)}">
       <td><span class="nm">${caret}${escape_(r.label)}</span></td>
@@ -1069,17 +1107,18 @@ function renderOpt(){
   };
 
   const tot = derive(camps.reduce((t,r) => { for (const k of RAW) t[k] += r[k]; return t; }, blank()));
-  const rows = flatten(camps);
+  const rows = flatten(camps, expandSet);
   const unLabel = STATE.mode === "total"
     ? "— sem campanha (orgânico/direto ou UTM não casada) —"
     : "— tráfego sem campanha casada (UTM não bateu) —";
-  const unRow = un.sales > 0
+  const unRow = (un.sales > 0 && !q)   // no filtro, esconde a linha "sem campanha"
     ? `<tr class="lv0 muted-row"><td><span class="nm"><span class="caret"></span>${unLabel}</span></td>${TCOLS.slice(1).map(c => `<td>${c.k === "sales" || c.k === "rev" ? c.fmt(un[c.k]) : "—"}</td>`).join("")}</tr>`
     : "";
+  const emptyMsg = q ? `Nenhum resultado para “${escape_(q)}”.` : "Nenhum dado no período.";
 
   document.getElementById("tbl").innerHTML = `
     <thead><tr>${head}</tr></thead>
-    <tbody>${rows.map(rowHTML).join("") || `<tr><td colspan="${TCOLS.length}" style="text-align:center;color:var(--ink-3);padding:32px">Nenhum dado no período.</td></tr>`}${unRow}</tbody>
+    <tbody>${rows.map(rowHTML).join("") || `<tr><td colspan="${TCOLS.length}" style="text-align:center;color:var(--ink-3);padding:32px">${emptyMsg}</td></tr>`}${unRow}</tbody>
     <tfoot><tr><td>Total — ${camps.length} campanha(s)</td>${TCOLS.slice(1).map(c => `<td>${c.fmt(tot[c.k])}</td>`).join("")}</tr></tfoot>`;
 
   document.querySelectorAll("#tbl tbody tr.exp").forEach(tr => {
@@ -1122,7 +1161,38 @@ function renderDaily(){
     const v = c.fmt(r[c.k]);
     return `<td>${st ? `<span class="cell-scale" style="${st}">${v}</span>` : v}</td>`;
   }).join("")}</tr>`).join("");
-  document.getElementById("dtbl").innerHTML = `<thead><tr>${head}</tr></thead><tbody>${body}</tbody>`;
+
+  // Linha de MÉDIA GERAL: custos/taxas = média ponderada do período (agregado);
+  // volumes (invest./checkouts/vendas) = média por dia.
+  const agg = aggregate(STATE.from, STATE.to);
+  const nDays = rows.length || 1;
+  const VOL = new Set(["spend", "ic", "sales"]);
+  const footCells = DCOLS.map(c => {
+    if (c.k === "d") return `<td>Média geral <span style="color:var(--ink-3);font-weight:500">· ${nDays} dia${nDays > 1 ? "s" : ""}</span></td>`;
+    if (VOL.has(c.k)) {
+      const per = agg[c.k] / nDays;
+      return `<td>${c.k === "spend" ? M.money(per) : M.n2(per)}<span style="color:var(--ink-3);font-weight:500;font-size:10.5px">/dia</span></td>`;
+    }
+    return `<td>${c.fmt(agg[c.k])}</td>`;
+  }).join("");
+  const foot = `<tfoot><tr title="Custos e taxas = média ponderada do período; investimento, checkouts e vendas = média por dia.">${footCells}</tr></tfoot>`;
+
+  document.getElementById("dtbl").innerHTML = `<thead><tr>${head}</tr></thead><tbody>${body}</tbody>${foot}`;
+
+  // No máximo ~10 dias visíveis; passando disso, rola (cabeçalho e média ficam fixos).
+  const wrap = document.getElementById("dtbl").parentElement;
+  const tbl = document.getElementById("dtbl");
+  if (rows.length > 10) {
+    const brows = tbl.tBodies[0].rows;
+    let h = tbl.tHead.getBoundingClientRect().height;
+    for (let i = 0; i < 10 && i < brows.length; i++) h += brows[i].getBoundingClientRect().height;
+    if (tbl.tFoot) h += tbl.tFoot.getBoundingClientRect().height;
+    wrap.classList.add("scrolly");
+    wrap.style.maxHeight = (h > 120 ? Math.ceil(h + 2) : 440) + "px";
+  } else {
+    wrap.classList.remove("scrolly");
+    wrap.style.maxHeight = "";
+  }
 }
 
 /* ============================================================ relatório
@@ -1449,7 +1519,8 @@ function shell(){
 
     <div class="panel">
       <h2>Visão diária — principais métricas por dia</h2>
-      <p class="note">Uma linha por dia, mais recente no topo. Heatmap por coluna: <b style="color:var(--good-text)">verde = melhor</b>,
+      <p class="note">Uma linha por dia, mais recente no topo (acima de 10 dias, rola aqui dentro; cabeçalho e a linha de <b style="color:var(--ink-2)">Média geral</b> ficam fixos).
+        Heatmap por coluna: <b style="color:var(--good-text)">verde = melhor</b>,
         <b style="color:var(--critical)">vermelho = pior</b> no período — CPM, CPC e CAC quanto menores melhor; ROAS quanto maior melhor.</p>
       <div class="tblwrap"><table id="dtbl" class="daily"></table></div>
     </div>
@@ -1462,6 +1533,11 @@ function shell(){
         Só entram aqui as <b style="color:var(--ink-1)">vendas de tráfego (utm_source = ${escape_(m.traffic_source||"meta-ads")})</b>, agrupadas pela campanha de origem;
         as de tráfego cuja UTM não casou aparecem em “tráfego sem campanha casada”. Vendas orgânicas/diretas não entram.
       </p>
+      <div class="optbar">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5" stroke-linecap="round"/></svg>
+        <input id="optSearch" type="search" placeholder="Filtrar por campanha, conjunto ou anúncio…" autocomplete="off" spellcheck="false">
+        <button id="optClear" type="button" title="Limpar filtro" hidden>✕</button>
+      </div>
       <div class="tblwrap"><table id="tbl" class="tree"></table></div>
     </div>
 
@@ -1524,6 +1600,15 @@ function shell(){
     try { STATE.goal ? localStorage.setItem("funnel-goal", STATE.goal) : localStorage.removeItem("funnel-goal"); } catch(e){}
     renderFunnel(aggregate(STATE.from, STATE.to));
   };
+
+  // filtro da Otimização (campanha / conjunto / anúncio)
+  const optS = document.getElementById("optSearch"), optClear = document.getElementById("optClear");
+  if (optS){
+    optS.value = STATE.optSearch || "";
+    if (optClear) optClear.hidden = !optS.value;
+    optS.oninput = () => { STATE.optSearch = optS.value; if (optClear) optClear.hidden = !optS.value; renderOpt(); };
+    if (optClear) optClear.onclick = () => { optS.value = ""; STATE.optSearch = ""; optClear.hidden = true; renderOpt(); optS.focus(); };
+  }
 
   // abas: Visão Geral (todas) · Tráfego Pago (meta-ads) · Relatório
   // chave "-v2": ignora preferência antiga salva (padrão passou a ser Visão Geral)
