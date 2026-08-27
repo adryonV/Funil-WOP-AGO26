@@ -744,27 +744,27 @@ function updateProjection(){
     : `a ação termina em <b>${dayFull(CAMPAIGN_END)}</b> — sem dias restantes; abaixo, o realizado até <b>${dayFull(lastDay)}</b>`;
 
   const cards = SCEN.map(s => {
-    const cac = baseCAC / s.f;
+    const cac = baseCAC / s.f;                       // CAC do restante (eficiência do cenário)
     const projSales = cac > 0 ? projSpend / cac : 0;
     const projRev = projSales * ticket;
     const totSpend = realized.spend + projSpend;
     const totSales = realized.sales + projSales;
     const totRev = realized.rev + projRev;
+    const totCac = totSales > 0 ? totSpend / totSales : null;   // CAC no fim da ação (blended)
     const totRoas = totSpend > 0 ? totRev / totSpend : null;
-    const totLucro = totRev - totSpend;
-    const score = Math.round(bandScore(cac / T));
+    const score = Math.round(bandScore((totCac || cac) / T));
     const eff = s.f === 1 ? "conversão atual" : `conversão ${s.f > 1 ? "+" : "−"}${Math.round(Math.abs(s.f - 1) * 100)}%`;
     return `
       <div class="scen" style="border-top:3px solid ${s.accent}">
         <div class="scen-h"><span>${s.emo} ${s.label}</span>
           <span class="scen-tag" style="background:color-mix(in srgb,${scoreColor(score)} 18%,transparent);color:${scoreColor(score)}">saúde ${isFinite(score) ? score : "—"}</span></div>
-        <div class="scen-eff">${eff} · CAC ${M.money(cac)}</div>
+        <div class="scen-eff">${eff} · valores no fim da ação (${dayBR(CAMPAIGN_END)})</div>
         <div class="scen-grid">
-          <div><span>Vendas no fim</span><b>${M.int(totSales)}</b><small>+${M.int(projSales)} no restante</small></div>
-          <div><span>Receita no fim</span><b>${M.money0(totRev)}</b><small>+${M.money0(projRev)}</small></div>
-          <div><span>Investimento total</span><b>${M.money0(totSpend)}</b><small>+${M.money0(projSpend)}</small></div>
-          <div><span>ROAS no fim</span><b style="color:${totRoas >= 1 ? "var(--good-text)" : "var(--ink-1)"}">${M.x(totRoas)}</b></div>
-          <div class="scen-full"><span>Resultado no fim da ação (${dayBR(CAMPAIGN_END)})</span><b style="color:${totLucro >= 0 ? "var(--good-text)" : "var(--critical)"}">${M.money0(totLucro)}</b></div>
+          <div><span>Valor gasto</span><b>${M.money0(totSpend)}</b><small>+${M.money0(projSpend)} no restante</small></div>
+          <div><span>Vendas</span><b>${M.int(totSales)}</b><small>+${M.int(projSales)} no restante</small></div>
+          <div><span>CAC</span><b style="color:${totCac != null && totCac <= T ? "var(--good-text)" : "var(--critical)"}">${M.money(totCac)}</b></div>
+          <div><span>Receita</span><b>${M.money0(totRev)}</b><small>+${M.money0(projRev)} no restante</small></div>
+          <div class="scen-full"><span>ROAS no fim da ação</span><b style="color:${totRoas >= 1 ? "var(--good-text)" : "var(--ink-1)"}">${M.x(totRoas)}</b></div>
         </div>
       </div>`;
   }).join("");
