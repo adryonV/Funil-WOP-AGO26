@@ -264,7 +264,12 @@ function headerIndex(h, ...names) {
     camp: headerIndex(h2, 'UTM Campaign', 'utm_campaign'),
     cont: headerIndex(h2, 'UTM Content', 'utm_content'),
     sck:  headerIndex(h2, 'SCK', 'sck', 'Site Custom Key'),
+    status: headerIndex(h2, 'Status'),   // coluna H — só APPROVED conta como venda
   };
+  // Regra do cliente: contabilizar como venda SOMENTE o que está APPROVED na coluna Status.
+  // (a planilha tem também COMPLETED, BILLET_PRINTED, EXPIRED, CANCELED, DISPUTE, REFUNDED)
+  const SALE_STATUS = 'APPROVED';
+  const isApprovedStatus = (s) => normKey(s).toUpperCase() === SALE_STATUS;
   // Auto-detect a value column the moment it is added to the sheet.
   const valIdx = headerIndex(h2, 'Valor Líquido', 'Valor Liquido', 'Valor da Compra', 'Valor',
                              'Bruto', 'Valor Bruto', 'Faturamento', 'Preço', 'Preco',
@@ -276,7 +281,7 @@ function headerIndex(h, ...names) {
 
   const sales = [];
   const attribution = { ad: 0, adset: 0, campaign: 0, unmatched: 0, none: 0 };
-  let trafficSales = 0, valuedFromCol = 0, sckAttributed = 0;
+  let trafficSales = 0, valuedFromCol = 0, sckAttributed = 0, droppedByStatus = 0;
 
   for (let i = 1; i < b.length; i++) {
     const r = b[i];
@@ -293,6 +298,9 @@ function headerIndex(h, ...names) {
     const hasUtm = [rawSrc, rawMed, rawCamp, rawCont].some(isUtm);
     // Skip placeholder/empty rows (only a date, no identity, no UTM).
     if (!name && !mail && !hasUtm) continue;
+
+    // Só conta como VENDA o que está APPROVED na coluna Status (coluna H) — regra do cliente.
+    if (B.status >= 0 && !isApprovedStatus(r[B.status])) { droppedByStatus++; continue; }
 
     // Value: from the sheet column if present, else the fallback ticket.
     // A coluna "Valor Líquido" vem em USD → converte p/ BRL (o data.json guarda a
@@ -353,6 +361,7 @@ function headerIndex(h, ...names) {
 
   const warnings = [];
   warnings.push(`Gasto da conta em USD → convertido para BRL a câmbio ×${fxInfo.fx.toFixed(4)} (${fxInfo.source}${fxInfo.date ? ', ' + fxInfo.date : ''}). Sem imposto.`);
+  if (B.status >= 0) warnings.push(`Contando como venda só status ${SALE_STATUS} (coluna H): ${sales.length} venda(s); ${droppedByStatus} linha(s) com outro status (COMPLETED/BILLET_PRINTED/EXPIRED/…) descartadas.`);
   if (sckAttributed > 0) warnings.push(`${sckAttributed} venda(s) de tráfego atribuídas ao CRIATIVO pela coluna SCK (utm_content vem errado nesta conta).`);
   if (hasValueCol) {
     warnings.push(`Receita = coluna "${normKey(h2[valIdx])}" (em US$) convertida para R$ a câmbio ×${fxInfo.fx.toFixed(4)}.`);
